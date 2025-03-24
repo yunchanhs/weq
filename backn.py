@@ -347,10 +347,10 @@ if __name__ == "__main__":
                     if df is None or df.empty:
                         continue
 
-                    df['macd'], df['signal'] = get_macd(ticker)
-                    df['rsi'] = get_rsi(ticker)
-                    df['adx'] = get_adx(ticker)
-                    df['atr'] = get_atr(ticker)
+                    df = get_macd_from_df(df)
+                    df = get_rsi_from_df(df)
+                    df = get_adx_from_df(df)
+                    df = get_atr_from_df(df)
 
                     macd = df['macd'].iloc[-1]
                     signal = df['signal'].iloc[-1]
