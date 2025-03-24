@@ -372,23 +372,32 @@ if __name__ == "__main__":
                     ATR_THRESHOLD = 0.015
 
                     if isinstance(ml_signal, (int, float)) and 0 <= ml_signal <= 1:
-                        if ml_signal > ML_THRESHOLD and macd >= signal and rsi < 50 and adx > 20 and atr > ATR_THRESHOLD:
-                            krw_balance = get_balance("KRW")
-                            print(f"[DEBUG] 보유 원화 잔고: {krw_balance:.2f}")
-                            if krw_balance > 5000:
-                                buy_amount = krw_balance * 0.3
-                                buy_result = buy_crypto_currency(ticker, buy_amount)
-                                if buy_result:
-                                    entry_prices[ticker] = current_price
-                                    highest_prices[ticker] = current_price
-                                    recent_trades[ticker] = now
-                                    print(f"[{ticker}] 매수 완료: {buy_amount:.2f}원, 가격: {current_price:.2f}")
+                        if is_surge:
+                            if ml_signal > ML_THRESHOLD and adx > 20 and atr > ATR_THRESHOLD:
+                                krw_balance = get_balance("KRW")
+                                if krw_balance > 5000:
+                                    buy_amount = krw_balance * 0.3
+                                    buy_result = buy_crypto_currency(ticker, buy_amount)
+                                    if buy_result:
+                                        entry_prices[ticker] = current_price
+                                        highest_prices[ticker] = current_price
+                                        recent_trades[ticker] = now
+                                        print(f"[{ticker}] (급등) 매수 완료: {buy_amount:.2f}원 @ {current_price:.2f}")
                                 else:
-                                    print(f"[{ticker}] 매수 요청 실패")
-                            else:
-                                print(f"[{ticker}] 매수 불가 (원화 부족)")
+                                    print(f"[{ticker}] 급등 매수 조건 불충족")
                         else:
-                            print(f"[{ticker}] 매수 조건 불충족")
+                            if ml_signal > ML_THRESHOLD and macd > signal and rsi < 50 and adx > 20 and atr > ATR_THRESHOLD:
+                                krw_balance = get_balance("KRW")
+                                if krw_balance > 5000:
+                                    buy_amount = krw_balance * 0.3
+                                    buy_result = buy_crypto_currency(ticker, buy_amount)
+                                    if buy_result:
+                                        entry_prices[ticker] = current_price
+                                        highest_prices[ticker] = current_price
+                                        recent_trades[ticker] = now
+                                        print(f"[{ticker}] 매수 완료: {buy_amount:.2f}원 @ {current_price:.2f}")
+                            else:
+                                print(f"[{ticker}] 일반 매수 조건 불충족")
 
                     elif ticker in entry_prices:
                         entry_price = entry_prices[ticker]
@@ -406,4 +415,4 @@ if __name__ == "__main__":
                     print(f"[{ticker}] 처리 중 에러 발생: {e}")
 
     except KeyboardInterrupt:
-        print("프로그램이 종료되었습니다.")
+        print("프로그램이 종료되었습니다."
