@@ -586,6 +586,13 @@ def compute_ml_threshold(ticker, regime, use_lax=False):
     t_sell = max(0.0, t_buy - TSELL_GAP)
     return t_buy, t_sell
 
+def get_dynamic_tp_by_regime(regime: str) -> float:
+    if regime == "bull":
+        return 0.35
+    elif regime == "bear":
+        return 0.15
+    return 0.25
+
 # =============== 급등 감지/스프레드/랭킹 ===============
 def detect_surge_tickers(threshold=0.03, interval="minute5", lookback=3):
     tickers = pyupbit.get_tickers(fiat="KRW")
@@ -691,7 +698,9 @@ def should_sell(ticker, current_price, ml_signal, t_sell, regime):
     peak_drop = (highest_prices[ticker] - current_price) / highest_prices[ticker]
     weak_ml = (ml_signal < t_sell)
     if chg < -0.05: log.info(f"[{ticker}] 🚨 -5% 손절 발동"); return True
-    if chg >= 0.20: log.info(f"[{ticker}] 🎯 +20% 익절"); return True
+    tp_dyn = get_dynamic_tp_by_regime(regime)
+    if chg >= tp_dyn:
+        print(f"[{ticker}] 레짐 기반 강제 익절 도달(+{tp_dyn*100:.0f}%) -> 익절")
     elif chg >= 0.15:
         if weak_ml or ml_signal < 0.6: log.info(f"[{ticker}] ✅ +15% & ML 약함 → 익절"); return True
         else: return False
@@ -963,7 +972,8 @@ def main():
                     # 현재 문턱으로 판단
                     _, T_sell_eff = compute_ml_threshold(t, regime, use_lax=False)
                     will_sell = should_sell(t, px, ml, T_sell_eff, regime)
-                    force_liq = (chg <= -0.05) or (chg >= 0.20)
+                    tp_dyn = get_dynamic_tp_by_regime(regime)
+                    force_liq = (chg <= -0.05) or (chg >= tp_dyn)
                     if will_sell or force_liq:
                         try:
                             coin = t.split('-')[1]
