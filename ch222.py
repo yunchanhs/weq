@@ -663,7 +663,7 @@ def get_top_tickers(n=None):
     return [t for t,_ in scores[:n]]
 
 # =============== ATR 기반 포지션 사이징 (Full-Capital Adaptive) ===============
-def calc_atr_position_budget(remaining_krw, remaining_slots, atr_abs, px, equity, base_risk=0.006, high_conf=False):
+def calc_atr_position_budget(remaining_krw, remaining_slots, atr_abs, px, equity, base_risk=0.010, high_conf=False):
     if atr_abs is None or atr_abs <= 0 or px <= 0:
         return (remaining_krw * USE_CASH_RATIO_BASE) / max(1, remaining_slots)
     k = 1.5
