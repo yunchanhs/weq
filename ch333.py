@@ -60,7 +60,7 @@ MAX_CONSECUTIVE_LOSSES = 3
 PROFIT_SKIM_TRIGGER = 0.03
 PROFIT_SKIM_RATIO = 0.25
 RESERVE_RELEASE_DD = 0.02
-POS_RISK_CAP = 0.0075                    # 포지션당 계좌위험 상한 0.75%
+POS_RISK_CAP = 0.33                    #포지션당 계좌위험 상한 0.75%
 
 # 부분 익절/트레일링
 PARTIAL_TP1, TP1_RATIO = 0.08, 0.40
@@ -986,7 +986,7 @@ def main():
                         high_conf = (ml > 0.70 and adx > 25 and macd_cross)
                         target = calc_atr_position_budget(
                             remaining_krw, remaining_slots, atr_abs, px, equity,
-                            base_risk=0.006, high_conf=high_conf
+                            base_risk=0.010, high_conf=high_conf
                         )
                         first_amt = min(target * 0.6, remaining_krw * USE_CASH_RATIO_EFF)
                         if first_amt >= MIN_ORDER_KRW:
