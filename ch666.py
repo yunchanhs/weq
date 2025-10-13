@@ -71,8 +71,8 @@ RESERVE_RELEASE_DD = 0.02
 POS_RISK_CAP = 0.50                      # 포지션당 최대 자본 비중 50%
 
 # 부분 익절/트레일링
-PARTIAL_TP1, TP1_RATIO = 0.12, 0.20
-PARTIAL_TP2, TP2_RATIO = 0.25, 0.10
+PARTIAL_TP1, TP1_RATIO = 0.08, 0.25
+PARTIAL_TP2, TP2_RATIO = 0.15, 0.15
 TRAIL_DROP_BULL, TRAIL_DROP_BEAR = 0.04, 0.025
 
 # K-of-N 동적 게이트 (기술조건 중 K개 이상 통과)
@@ -752,7 +752,7 @@ def try_partial_take_profit(ticker, change_ratio, coin_balance, now):
 
         if did:
             with state_lock:
-                recent_trades[ticker] = now   # 체결 타임스탬프만 갱신(진입시각은 그대로)
+                #recent_trades[ticker] = now   # 체결 타임스탬프만 갱신(진입시각은 그대로)
 
     except Exception as e:
         log.info(f"[{ticker}] 부분익절 예외: {e}")
