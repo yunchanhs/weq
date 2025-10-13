@@ -668,23 +668,17 @@ def atr_adaptive_gate(px, feats, regime):
     passed = atr_now > th_abs
     return passed, atr_now, th_abs
 
-# ===================== 부분 익절/매도 로직 =====================
+# ===================== 부분 익절/트레일링/전체 매도 =====================
 def try_partial_take_profit(ticker, change_ratio, coin_balance, now):
     """
-    개선된 부분익절 로직:
-      - ml 히스토리와 진입 시간(recent_trades) 확인
-      - 급등 스파이크(짧은 시간 내 큰 상승)일 경우 부분익절 보류 가능
-      - ML 신호 강하면 부분익절 건너뜀(lets winners run)
-      - ATR/볼륨에 따라 비율 조정
+    개선된 부분익절 로직 + ML 히스토리 + ATR 기반 조정
     """
     did = False
     try:
-        # 마지막 ML 신호(없으면 0.5 기본)
-        ml_last = ml_hist[ticker][-1] if ticker in ml_hist and len(ml_hist[ticker])>0 else 0.5
+        ml_last = ml_hist[ticker][-1] if ticker in ml_hist and len(ml_hist[ticker]) > 0 else 0.5
         entry_time = recent_trades.get(ticker, None)
         time_since_entry_min = (now - entry_time).total_seconds()/60.0 if entry_time else 9999.0
 
-        # ATR 기반 변동성(안전: safe get)
         feats = None
         try:
             feats = get_features(ticker, interval="minute5", normalize=False, count=200)
@@ -692,45 +686,116 @@ def try_partial_take_profit(ticker, change_ratio, coin_balance, now):
             feats = None
         atr_now = float(feats['atr'].iloc[-1]) if is_valid_df(feats, min_len=20) else None
 
-        # 1) 빠른 급등(스파이크) 감지: 진입 후 짧은시간내(예 15분) + 큰 상승(예 12%)이면 보류
+        # 1) 급등 스파이크 감지
         if time_since_entry_min < 15 and change_ratio >= 0.12:
-            log.info(f"[{ticker}] 부분익절 보류: 진입후 {time_since_entry_min:.1f}분 · 급등 {change_ratio*100:.1f}%")
+            log.info(f"[{ticker}] 부분익절 보류: 진입후 {time_since_entry_min:.1f}분, 급등 {change_ratio*100:.1f}%")
             return False
 
-        # 2) ML 강하면 부분익절 하지 않음 (성장전략)
+        # 2) ML 신호 강하면 부분익절 건너뜀
         if ml_last >= 0.65:
             log.info(f"[{ticker}] 부분익절 건너뜀: ML 강함({ml_last:.2f})")
             return False
 
-        # 3) ATR 기반으로 비율 보정 (변동성 높을수록 부분비율 낮춤 — 더 오래탐)
+        # 3) ATR 변동성 조정
         mult = 1.0
         if atr_now is not None and atr_now > 0:
-            # 임의 기준: ATR이 클수록 시장 변동성 높음 -> 부분익절 비율 줄이기
-            # (이 수치들은 튜닝 가능)
             if atr_now > 1.5 * np.median(feats['atr'].tail(60)):
                 mult = 0.6
 
-        # 기존 퍼센트 도달시 부분익절 (우선 PARTIAL_TP2 먼저)
+        # TP2 우선 적용
         if change_ratio >= PARTIAL_TP2 and coin_balance > 0:
             amt = coin_balance * (TP2_RATIO * mult)
             if amt * pyupbit.get_current_price(ticker) >= MIN_ORDER_KRW:
                 if sell_crypto_currency(ticker, amt):
                     did = True
-                    log.info(f"[{ticker}] 부분익절2 실행: +{PARTIAL_TP2*100:.0f}% → {TP2_RATIO*100*mult:.0f}% 매도 (ML={ml_last:.2f})")
+                    log.info(f"[{ticker}] 부분익절2 실행: {TP2_RATIO*100*mult:.0f}% 매도 (ML={ml_last:.2f})")
         elif change_ratio >= PARTIAL_TP1 and coin_balance > 0:
             amt = coin_balance * (TP1_RATIO * mult)
             if amt * pyupbit.get_current_price(ticker) >= MIN_ORDER_KRW:
                 if sell_crypto_currency(ticker, amt):
                     did = True
-                    log.info(f"[{ticker}] 부분익절1 실행: +{PARTIAL_TP1*100:.0f}% → {TP1_RATIO*100*mult:.0f}% 매도 (ML={ml_last:.2f})")
+                    log.info(f"[{ticker}] 부분익절1 실행: {TP1_RATIO*100*mult:.0f}% 매도 (ML={ml_last:.2f})")
 
         if did:
             with state_lock:
                 recent_trades[ticker] = now
+
     except Exception as e:
         log.info(f"[{ticker}] 부분익절 예외: {e}")
         return False
     return did
+
+def try_trailing_stop(ticker, coin_balance, now, regime="neutral"):
+    """
+    트레일링 스탑 로직
+    """
+    try:
+        px_now = pyupbit.get_current_price(ticker)
+        if px_now is None: return False
+        with state_lock:
+            hi = highest_prices.get(ticker, px_now)
+            highest_prices[ticker] = max(hi, px_now)
+            hi = highest_prices[ticker]
+
+        drop_pct = (hi - px_now) / hi
+        drop_threshold = TRAIL_DROP_BULL if regime=="bull" else TRAIL_DROP_BEAR
+
+        if drop_pct >= drop_threshold and coin_balance > 0:
+            if sell_crypto_currency(ticker, coin_balance):
+                log.info(f"[{ticker}] 트레일링스탑 발동: {drop_pct*100:.2f}% 하락")
+                with state_lock:
+                    entry_prices.pop(ticker, None)
+                    highest_prices.pop(ticker, None)
+                    recent_trades.pop(ticker, None)
+                return True
+    except Exception as e:
+        log.info(f"[{ticker}] 트레일링스탑 예외: {e}")
+    return False
+
+def try_hard_stop(ticker, coin_balance, now, regime="neutral"):
+    """
+    레짐/하드스톱 기반 매도
+    """
+    try:
+        px_now = pyupbit.get_current_price(ticker)
+        if px_now is None or ticker not in entry_prices: return False
+        entry_px = entry_prices[ticker]
+        stop_loss = get_dynamic_stop_by_regime(regime)
+        pnl = (px_now - entry_px)/entry_px
+        if pnl <= stop_loss and coin_balance > 0:
+            if sell_crypto_currency(ticker, coin_balance):
+                log.info(f"[{ticker}] 하드스톱 매도: PnL={pnl*100:.2f}%, Stop={stop_loss*100:.2f}%")
+                with state_lock:
+                    entry_prices.pop(ticker, None)
+                    highest_prices.pop(ticker, None)
+                    recent_trades.pop(ticker, None)
+                return True
+    except Exception as e:
+        log.info(f"[{ticker}] 하드스톱 예외: {e}")
+    return False
+
+def manage_position(ticker, now, regime="neutral"):
+    """
+    혼합전략 포지션 관리
+    """
+    coin = ticker.split('-')[1]
+    coin_balance = get_balance(coin)
+    if coin_balance <= 0: return
+
+    px_now = pyupbit.get_current_price(ticker)
+    if px_now is None: return
+
+    entry_px = entry_prices.get(ticker, px_now)
+    change_ratio = (px_now - entry_px) / entry_px
+
+    # 1) 부분익절 시도
+    try_partial_take_profit(ticker, change_ratio, coin_balance, now)
+
+    # 2) 트레일링 스탑 시도
+    try_trailing_stop(ticker, coin_balance, now, regime=regime)
+
+    # 3) 하드스톱 적용
+    try_hard_stop(ticker, coin_balance, now, regime=regime)
 
 def should_sell(ticker, current_price, ml_signal, t_sell, regime):
     if ticker not in entry_prices: return False
