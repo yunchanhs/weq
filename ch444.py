@@ -71,8 +71,8 @@ RESERVE_RELEASE_DD = 0.02
 POS_RISK_CAP = 0.50                      # 포지션당 최대 자본 비중 50%
 
 # 부분 익절/트레일링
-PARTIAL_TP1, TP1_RATIO = 0.08, 0.40
-PARTIAL_TP2, TP2_RATIO = 0.15, 0.30
+PARTIAL_TP1, TP1_RATIO = 0.12, 0.20
+PARTIAL_TP2, TP2_RATIO = 0.25, 0.10
 TRAIL_DROP_BULL, TRAIL_DROP_BEAR = 0.04, 0.025
 
 # K-of-N 동적 게이트 (기술조건 중 K개 이상 통과)
