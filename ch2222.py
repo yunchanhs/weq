@@ -534,39 +534,116 @@ class TradingDataset(Dataset):
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
 
 def train_hybrid_model(ticker, epochs=EPOCHS_STRICT):
+    """
+    안정화 포인트
+    - pos_weight 과도값 클램프 (loss 급등 방지)
+    - 배치 수 적을 때 OneCycleLR 대신 안전한 폴백 스케줄러
+    - drop_last=True 로 스텝 수 고정 → 스케줄러/로스 안정
+    - 에폭당 평균 loss 로깅 (마지막 배치만 찍지 않음)
+    - NaN/inf 방지 및 그라드 클립
+    """
     log.info(f"모델 학습 시작: {ticker}")
+
+    # --- 데이터 준비 ---
     data = build_features(ticker, interval="minute5", count=800)
     if data is None or data.empty or len(data) < 200:
-        log.info(f"경고: {ticker} 데이터 부족. 학습 스킵"); return None
+        log.info(f"경고: {ticker} 데이터 부족. 학습 스킵"); 
+        return None
 
     ds = TradingDataset(data, seq_len=30)
     if len(ds) == 0:
-        log.info(f"경고: {ticker} 데이터셋 너무 작음. 학습 스킵"); return None
-    dl = DataLoader(ds, batch_size=32, shuffle=True, num_workers=0)
+        log.info(f"경고: {ticker} 데이터셋 너무 작음. 학습 스킵"); 
+        return None
 
-    # 라벨 분포(양성 비율)로 pos_weight 계산
+    # 작은 배치로 과적합/불안정이 생기면 32→16으로 자동 축소
+    batch_size = 32 if len(ds) >= 1024 else 16
+    dl = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=0, drop_last=True)
+
+    if len(dl) == 0:
+        log.info(f"경고: {ticker} 유효 배치가 없음(drop_last 영향). 학습 스킵"); 
+        return None
+
+    # --- 라벨 분포 기반 pos_weight (클램프) ---
     pos_ratio = float((data['future_return'] > 0).mean())
-    pos_w = (1.0 - pos_ratio) / max(pos_ratio, 1e-3)
-    log.info(f"[{ticker}] label_pos_ratio={pos_ratio:.2f}, pos_weight={pos_w:.2f}")
+    # 극단값에서 loss 폭주 방지
+    pos_ratio = float(np.clip(pos_ratio, 0.05, 0.95))
+    pos_w = (1.0 - pos_ratio) / max(pos_ratio, 1e-6)
+    pos_w = float(np.clip(pos_w, 0.5, 5.0))
+    log.info(f"[{ticker}] label_pos_ratio={pos_ratio:.2f}, pos_weight={pos_w:.2f}, batch_size={batch_size}, steps/epoch={len(dl)}")
 
-    model = HybridModel(in_dim=6)
-    crit  = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_w]))
+    # --- 디바이스/모델/손실/옵티마이저 ---
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = HybridModel(in_dim=6).to(device)
+
+    # BCEWithLogitsLoss는 로짓 입력 기대 → 시그모이드 없이 logits 사용
+    crit  = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_w], dtype=torch.float32, device=device))
     opt   = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
-    sched = torch.optim.lr_scheduler.OneCycleLR(
-        opt, max_lr=6e-4, epochs=epochs, steps_per_epoch=len(dl)
-    )
 
+    # 스케줄러: 배치 수가 충분하면 OneCycle, 아니면 안전 폴백
+    steps_per_epoch = len(dl)
+    total_steps = steps_per_epoch * max(1, epochs)
+
+    scheduler = None
+    if steps_per_epoch >= 10:
+        # 과민반응 줄이려고 최대 LR를 살짝 낮추고 워밍업 비율 부여
+        try:
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                opt, max_lr=5e-4, epochs=epochs, steps_per_epoch=steps_per_epoch, pct_start=0.15
+            )
+        except Exception as e:
+            log.info(f"[{ticker}] OneCycleLR 생성 실패 → 폴백 사용: {e}")
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=total_steps)
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=total_steps)
+
+    # --- 학습 루프 ---
     model.train()
-    for ep in range(1, epochs+1):
+    for ep in range(1, epochs + 1):
+        epoch_loss_sum = 0.0
+        epoch_count = 0
+
         for xb, yb in dl:
-            opt.zero_grad()
+            xb = xb.to(device, non_blocking=False)
+            yb = yb.view(-1).to(device, non_blocking=False)
+
+            opt.zero_grad(set_to_none=True)
             logits = model(xb).view(-1)
-            loss   = crit(logits, yb.view(-1))
+
+            # NaN/Inf 방지
+            if torch.isnan(logits).any() or torch.isinf(logits).any():
+                log.info(f"[{ticker}] 경고: logits에 NaN/Inf 발생 → 배치 스킵")
+                continue
+
+            loss = crit(logits, yb)
+            if torch.isnan(loss) or torch.isinf(loss):
+                log.info(f"[{ticker}] 경고: loss NaN/Inf → 배치 스킵")
+                continue
+
             loss.backward()
+            # 그라드 폭주 방지
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step(); sched.step()
-        if ep % 5 == 0 or ep == epochs:
-            log.info(f"[{ticker}] Epoch {ep}/{epochs} | Loss: {loss.item():.4f}")
+            opt.step()
+
+            # 스케줄러 스텝(배치마다)
+            try:
+                scheduler.step()
+            except Exception:
+                pass
+
+            epoch_loss_sum += float(loss.item())
+            epoch_count += 1
+
+        # 에폭 평균 로스
+        avg_loss = epoch_loss_sum / max(1, epoch_count)
+        if (ep % 5 == 0) or (ep == epochs):
+            lr_now = opt.param_groups[0]["lr"]
+            log.info(f"[{ticker}] Epoch {ep}/{epochs} | mean_loss: {avg_loss:.4f} | lr: {lr_now:.6f}")
+
+        # 드문 케이스: 평균 loss가 비정상적으로 큰 경우(예: > 5) 조기 수렴/학습률 반으로
+        if avg_loss > 5.0 and ep >= 3:
+            for g in opt.param_groups:
+                g["lr"] = max(g["lr"] * 0.5, 1e-5)
+
     log.info(f"모델 학습 완료: {ticker}")
     return model
 
