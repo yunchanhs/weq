@@ -257,15 +257,16 @@ def fresh_price(ticker):
 
 def get_orderbook_cached(ticker):
     c = get_cached(orderbook_cache, ticker, TTL_SEC["orderbook"])
-    if c is not None: return c
+    if c is not None:
+        return c
     try:
         ob = pyupbit.get_orderbook(ticker)
-        if ob:
+        if ob is not None:
             set_cached(orderbook_cache, ticker, ob)
-            return ob
-    except Exception:
-        pass
-    return None
+        return ob
+    except Exception as e:
+        log.info(f"[orderbook] {ticker} 조회 예외: {e}")
+        return None
 
 def upbit_client():
     return pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
@@ -589,15 +590,33 @@ def detect_surge_tickers(threshold=0.03, interval="minute5", lookback=3):
     return surged
 
 def get_spread_bp(ticker):
-    ob = get_orderbook_cached(ticker)
-    if not ob or 'orderbook_units' not in ob[0]: return None
+    """
+    pyupbit.get_orderbook() 반환형이 종종 dict 혹은 list[dict]로 섞여 들어옴.
+    - None / 빈 값 / 구조 불일치 모두 안전하게 None 리턴.
+    - 정상일 때만 상단 호가로 스프레드(bp) 계산.
+    """
     try:
-        u = ob[0]['orderbook_units'][0]
-        ask, bid = float(u['ask_price']), float(u['bid_price'])
-        spread = (ask - bid) / ((ask + bid)/2)
-        return spread * 10000.0
-    except Exception:
-        return None
+        ob = get_orderbook_cached(ticker)
+        if not ob:
+            return None
+
+        # list[dict] 또는 dict 모두 처리
+        first = ob[0] if isinstance(ob, (list, tuple)) else ob
+        if not isinstance(first, dict):
+            return None
+
+        units = first.get("orderbook_units")
+        if not units or not isinstance(units, (list, tuple)):
+            return None
+        top = units[0] if units else None
+        if not top or "ask_price" not in top or "bid_price" not in top:
+            return None
+
+        ask = float(top["ask_price"])
+        bid = float(top["bid_price"])
+        mid = (ask + bid) / 2.0
+        if mid <= 0:
+            return None
 
 def rank_universe(candidates, surge_dict):
     scored = []
