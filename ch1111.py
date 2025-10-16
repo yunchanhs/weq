@@ -34,10 +34,12 @@ last_trained_time = {}
 TRAINING_INTERVAL = timedelta(hours=8)   # 주기 재학습 간격(보수)
 
 # 에포크 구성(밸런스 버전)
-EPOCHS_STRICT   = 48     # 초기 학습(엄격 필터)
-EPOCHS_RELAX    = 32     # 초기 완화 재평가
-EPOCHS_PERIODIC = 36     # 6시간 주기 재학습
-EPOCHS_SURGE    = 24     # 급등 감지 시 빠른 경량 학습
+EPOCHS_STRICT   = 50      # 초기 학습(엄격 필터)
+EPOCHS_RELAX    = 35     # 초기 완화 재평가
+EPOCHS_PERIODIC = 40     # 6시간 주기 재학습
+EPOCHS_SURGE    = 30     # 급등 감지 시 빠른 경량 학습
+SEED = 42
+torch.manual_seed(SEED); np.random.seed(SEED)
 
 # 문턱/리스크
 ML_BASE_THRESHOLD = 0.50
@@ -521,10 +523,10 @@ class HybridModel(nn.Module):
         self.tran = TransBlock(in_dim=in_dim, d_model=32, heads=4, layers=1)
         mix_dim = 12 + 24 + 32
         self.head = nn.Sequential(
-            nn.Linear(mix_dim, 32),
+            nn.Linear(mix_dim, 64),
             nn.ReLU(),
-            nn.Linear(32, 1),
-            nn.Sigmoid()                     # 0~1 점수
+            nn.Dropout(0,1)
+            nn.Linear(64, 1),                     # 0~1 점수
         )
     def forward(self, x):
         c = self.cnn(x); l = self.lstm(x); t = self.tran(x)
@@ -541,26 +543,38 @@ class TradingDataset(Dataset):
         y = 1.0 if self.data.iloc[idx + self.seq_len]['future_return'] > 0 else 0.0
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
 
-def train_hybrid_model(ticker, epochs=25):
-    log.info(f"모델 학습 시작: {ticker} (epochs={epochs})")
+def train_hybrid_model(ticker, epochs=EPOCHS_STRICT):
+    log.info(f"모델 학습 시작: {ticker}")
     data = build_features(ticker, interval="minute5", count=800)
     if data is None or data.empty or len(data) < 200:
         log.info(f"경고: {ticker} 데이터 부족. 학습 스킵"); return None
+
     ds = TradingDataset(data, seq_len=30)
     if len(ds) == 0:
         log.info(f"경고: {ticker} 데이터셋 너무 작음. 학습 스킵"); return None
     dl = DataLoader(ds, batch_size=32, shuffle=True, num_workers=0)
+
+    # 라벨 분포(양성 비율)로 pos_weight 계산
+    pos_ratio = float((data['future_return'] > 0).mean())
+    pos_w = (1.0 - pos_ratio) / max(pos_ratio, 1e-3)
+    log.info(f"[{ticker}] label_pos_ratio={pos_ratio:.2f}, pos_weight={pos_w:.2f}")
+
     model = HybridModel(in_dim=6)
-    crit = nn.BCELoss()
-    opt  = torch.optim.Adam(model.parameters(), lr=0.001)
+    crit  = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_w]))
+    opt   = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    sched = torch.optim.lr_scheduler.OneCycleLR(
+        opt, max_lr=6e-4, epochs=epochs, steps_per_epoch=len(dl)
+    )
+
     model.train()
     for ep in range(1, epochs+1):
         for xb, yb in dl:
             opt.zero_grad()
-            pred = model(xb).view(-1)
-            loss = crit(pred, yb.view(-1))
+            logits = model(xb).view(-1)               # <-- logits
+            loss   = crit(logits, yb.view(-1))
             loss.backward()
-            opt.step()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step(); sched.step()
         if ep % 5 == 0 or ep == epochs:
             log.info(f"[{ticker}] Epoch {ep}/{epochs} | Loss: {loss.item():.4f}")
     log.info(f"모델 학습 완료: {ticker}")
@@ -948,7 +962,7 @@ def backtest_series(data, model, init_bal, t_buy, t_sell, fee=0.0005, slip_bp=10
     for i in range(seq, len(data)-1):
         X = torch.tensor(data.iloc[i-seq:i][['macd','signal','rsi','adx','atr','return']].values, dtype=torch.float32).unsqueeze(0)
         with torch.no_grad():
-            s = model(X).item()
+            s = torch.sigmoid(model(X)).item()    # <-- 바뀐 부분
         px = data.iloc[i]['close']
         if pos == 0 and s > t_buy:
             fill = px * (1 + slip)
@@ -1221,7 +1235,7 @@ def main():
                 X = torch.tensor(feats[['macd','signal','rsi','adx','atr','return']].tail(30).values, dtype=torch.float32).unsqueeze(0)
                 model = models[t]; model.eval()
                 with torch.no_grad():
-                    ml = model(X).item()
+                    ml = torch.sigmoid(model(X)).item()
                 ml_hist[t].append(ml)
 
                 # 문턱
