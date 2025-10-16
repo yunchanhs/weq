@@ -486,7 +486,7 @@ class LSTMBlock(nn.Module):
         return o[:, -1, :]
 
 class TransBlock(nn.Module):
-    def __init__(self, in_dim=6, d_model=24, heads=3, layers=1):
+    def __init__(self, in_dim=6, d_model=24, heads=4, layers=1):
         super().__init__()
         self.emb = nn.Linear(in_dim, d_model)
         enc_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=heads, batch_first=True)
@@ -501,7 +501,7 @@ class HybridModel(nn.Module):
         super().__init__()
         self.cnn  = CNNBlock(in_ch=in_dim, channels=12, k=3)
         self.lstm = LSTMBlock(in_dim=in_dim, hid=24, layers=1)
-        self.tran = TransBlock(in_dim=in_dim, d_model=24, heads=3, layers=1)
+        self.tran = TransBlock(in_dim=in_dim, d_model=24, heads=4, layers=1)
         mix_dim = 12 + 24 + 24
         self.head = nn.Sequential(
             nn.Linear(mix_dim, 32),
@@ -591,9 +591,10 @@ def detect_surge_tickers(threshold=0.03, interval="minute5", lookback=3):
 
 def get_spread_bp(ticker):
     """
-    pyupbit.get_orderbook() 반환형이 종종 dict 혹은 list[dict]로 섞여 들어옴.
-    - None / 빈 값 / 구조 불일치 모두 안전하게 None 리턴.
-    - 정상일 때만 상단 호가로 스프레드(bp) 계산.
+    안전한 호가스프레드(bp) 계산:
+    - pyupbit.get_orderbook()이 list[dict] / dict / None 어느 형태로 와도 처리
+    - 구조 불일치면 None 반환 (필터에서 자동 스킵)
+    - 반환 단위: basis points (예: 12.3bp == 0.123%)
     """
     try:
         ob = get_orderbook_cached(ticker)
@@ -608,15 +609,25 @@ def get_spread_bp(ticker):
         units = first.get("orderbook_units")
         if not units or not isinstance(units, (list, tuple)):
             return None
+
         top = units[0] if units else None
-        if not top or "ask_price" not in top or "bid_price" not in top:
+        if not top:
             return None
 
-        ask = float(top["ask_price"])
-        bid = float(top["bid_price"])
+        ask = float(top.get("ask_price", 0))
+        bid = float(top.get("bid_price", 0))
+        if ask <= 0 or bid <= 0:
+            return None
+
         mid = (ask + bid) / 2.0
         if mid <= 0:
             return None
+
+        spread = (ask - bid) / mid
+        return spread * 10000.0  # bp 단위로 반환
+    except Exception as e:
+        log.info(f"[spread] {ticker} 예외: {e}")
+        return None
 
 def rank_universe(candidates, surge_dict):
     scored = []
